@@ -23,15 +23,24 @@ if not ret:
     exit(1)
 
 # Configure PyAutoGUI
+'''
+PyAutoGUI has a safety feature where you can stop a script by quickly moving the mouse to a corner of the screen.
+This line disables that feature, which is necessary for the program to have full control of the cursor.
+'''
 pyautogui.FAILSAFE = False
+
+'''
+By default, PyAutoGUI adds a tiny pause after every command.
+Setting it to zero removes this delay, making the mouse control as responsive as possible.
+'''
 pyautogui.PAUSE = 0
 
 # Get screen size
 screen_width, screen_height = pyautogui.size()
 
 # Define the portion of the camera view to map to the full screen (70% here)
+# to avoid jerky movement if hand moves to the edge of camera.
 inner_area_percent = 0.7
-
 # Calculate the margins around the inner area
 def calculate_margins(frame_width, frame_height, inner_area_percent):
     margin_width = frame_width * (1 - inner_area_percent) / 2
@@ -40,6 +49,7 @@ def calculate_margins(frame_width, frame_height, inner_area_percent):
 
 # Convert video coordinates to screen coordinates
 def convert_to_screen_coordinates(x, y, frame_width, frame_height, margin_width, margin_height):
+    # resolution of video captures is different from the screen's resolution.
     screen_x = np.interp(x, (margin_width, frame_width - margin_width), (0, screen_width))
     screen_y = np.interp(y, (margin_height, frame_height - margin_height), (0, screen_height))
     return screen_x, screen_y
@@ -52,6 +62,8 @@ def get_landmark_distance(landmark1, landmark2):
     return distance
 
 # Movement Thread for smoother cursor movement
+# this is a seperate thread, running at whatever rate CPU allows(100-1000 iter per sec).
+# moves the cursor to the target location set by the main camera loop, (~30 iter per sec).
 class CursorMovementThread(threading.Thread):
     def __init__(self):
         super().__init__()
@@ -68,6 +80,7 @@ class CursorMovementThread(threading.Thread):
                 distance = np.hypot(self.target_x - self.current_x, self.target_y - self.current_y)
                 screen_diagonal = np.hypot(screen_width, screen_height)
                 if distance / screen_diagonal > self.jitter_threshold:
+                    # moves cursor faster to target if its far away from the target, slows down when it gets closer.
                     step = max(0.0001, distance / 12)  # Smoother movement
                     if distance != 0:
                         step_x = (self.target_x - self.current_x) / distance * step
@@ -103,6 +116,9 @@ class ScrollThread(threading.Thread):
         self.scroll_step = 0.01  # Smaller step for smoother scroll
         self.inertia_threshold = 0.01  # Minimum inertia scroll amount
 
+    '''
+    main loop detects scroll gesture -> scroll amount queued -> scroll thread takes, scroll, appends back a smaller amount -> Iteratively continues till 0 
+    '''
     def run(self):
         while self.running:
             if self.scroll_queue:
@@ -136,8 +152,14 @@ touch_threshold = 0.19
 scroll_threshold = 0.005  # Smaller threshold for finer detection
 scroll_sensitivity = 0.05  # Adjust this value for scrolling speed
 
+# tweak experimentally
+base_swipe_threshold = 0.2
+base_neutral_margin=0.01
+
 try:
     previous_y = None
+    last_action = 'neutral'
+
     while True:
         # Read a frame from the webcam
         ret, frame = cap.read()
@@ -157,6 +179,7 @@ try:
         if results.multi_hand_landmarks:
             movement_thread.activate()
             for hand_landmarks in results.multi_hand_landmarks:
+
                 # Use the base of the ring finger (RING_FINGER_MCP) for tracking
                 ring_finger_mcp = hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_MCP]
                 mcp_x = int(ring_finger_mcp.x * frame.shape[1])
@@ -206,6 +229,33 @@ try:
                     previous_y = middle_tip.y
                 else:
                     previous_y = None
+
+
+                # Tilt detection- based on horizontal distance between wrist and middle finger mcp
+                # use following code if a trigger is required in future
+                # pinky_mcp = hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP]
+                # pinky_thumb_distance = get_landmark_distance(pinky_mcp, thumb_tip)
+                # print(pinky_thumb_distance, adaptive_threshold)
+                # if pinky_thumb_distance < adaptive_threshold:
+
+                # wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
+                # middle_finger_tip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+                # hand_size = get_landmark_distance(wrist, middle_tip)
+
+                adaptive_tilt_threshold = base_swipe_threshold * hand_size
+                adaptive_neutral_margin = base_neutral_margin * hand_size
+
+                middle_mcp = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_MCP]
+                x_diff = middle_mcp.x - wrist.x
+
+                if x_diff < -adaptive_tilt_threshold and last_action != 'left':
+                    pyautogui.press('left')
+                    last_action = 'left'
+                elif x_diff > adaptive_tilt_threshold and last_action != 'right':
+                    pyautogui.press('right')
+                    last_action = 'right'
+                elif -adaptive_neutral_margin < x_diff < adaptive_neutral_margin:
+                    last_action = 'neutral'
         else:
             # No hands detected
             if mouse_pressed:

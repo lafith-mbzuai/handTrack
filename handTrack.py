@@ -16,146 +16,43 @@ hands = mp_hands.Hands(
     model_complexity=1
 )
 
+# for visualization
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
+
 # Set up the webcam
 cap = cv2.VideoCapture(0)
 ret, frame = cap.read()
 if not ret:
-    print("Failed to capture video")
+    #print("Failed to capture video")
     exit(1)
 
 # Configure PyAutoGUI
-'''
-PyAutoGUI has a safety feature where you can stop a script by quickly moving the mouse to a corner of the screen.
-This line disables that feature, which is necessary for the program to have full control of the cursor.
-'''
 pyautogui.FAILSAFE = False
-
-'''
-By default, PyAutoGUI adds a tiny pause after every command.
-Setting it to zero removes this delay, making the mouse control as responsive as possible.
-'''
 pyautogui.PAUSE = 0
 
 # Get screen size
 screen_width, screen_height = pyautogui.size()
 
 # Define the portion of the camera view to map to the full screen (70% here)
-# to avoid jerky movement if hand moves to the edge of camera.
 inner_area_percent = 0.7
 
-# Swipe detection parameters
-SWIPE_HISTORY_SIZE = 10  # Number of frames to track for swipe
-SWIPE_MIN_DISTANCE = 0.25  # Minimum horizontal movement as fraction of frame width
-SWIPE_MAX_FRAMES = 15  # Maximum frames for a swipe to complete
-SWIPE_VERTICAL_TOLERANCE = 0.15  # Maximum vertical movement as fraction of frame height
-SWIPE_COOLDOWN_FRAMES = 20  # Frames to wait before detecting next swipe
-OPEN_PALM_THRESHOLD = 1.8  # Threshold for detecting open palm (normalized)
-
-# Calculate the margins around the inner area
 def calculate_margins(frame_width, frame_height, inner_area_percent):
     margin_width = frame_width * (1 - inner_area_percent) / 2
     margin_height = frame_height * (1 - inner_area_percent) / 2
     return margin_width, margin_height
 
-# Convert video coordinates to screen coordinates
 def convert_to_screen_coordinates(x, y, frame_width, frame_height, margin_width, margin_height):
-    # resolution of video captures is different from the screen's resolution.
     screen_x = np.interp(x, (margin_width, frame_width - margin_width), (0, screen_width))
     screen_y = np.interp(y, (margin_height, frame_height - margin_height), (0, screen_height))
     return screen_x, screen_y
 
-# function to get distance between two landmarks
 def get_landmark_distance(landmark1, landmark2):
     x1, y1 = landmark1.x, landmark1.y
     x2, y2 = landmark2.x, landmark2.y
-    distance = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-    return distance
+    return np.hypot(x2 - x1, y2 - y1)
 
-# swipe detection
-class SwipeDetector:
-    def __init__(self, frame_width):
-        self.position_history = deque(maxlen=SWIPE_HISTORY_SIZE)
-        self.frame_width = frame_width
-        self.cooldown_counter = 0
-        self.swipe_start_frame = 0
-        self.is_swiping = False
-        
-    def update_frame_width(self, width):
-        self.frame_width = width
-        
-    def add_position(self, x, y, frame_count):
-        self.position_history.append((x, y, frame_count))
-        
-    def clear_history(self):
-        self.position_history.clear()
-        self.is_swiping = False
-        
-    def detect_swipe(self, current_frame):
-        if self.cooldown_counter > 0:
-            self.cooldown_counter -= 1
-            return None
-            
-        if len(self.position_history) < 3:
-            return None
-            
-        # Get positions from history
-        positions = list(self.position_history)
-        
-        # Check if movement is recent enough
-        start_frame = positions[0][2]
-        if current_frame - start_frame > SWIPE_MAX_FRAMES:
-            # Movement too slow, reset
-            self.clear_history()
-            return None
-            
-        # Calculate horizontal and vertical displacement
-        start_x, start_y = positions[0][0], positions[0][1]
-        end_x, end_y = positions[-1][0], positions[-1][1]
-        
-        horizontal_displacement = (end_x - start_x) / self.frame_width
-        vertical_displacement = abs(end_y - start_y) / self.frame_width
-        
-        # Check if vertical movement is within tolerance
-        if vertical_displacement > SWIPE_VERTICAL_TOLERANCE:
-            return None
-            
-        # Check if horizontal movement is sufficient
-        if abs(horizontal_displacement) > SWIPE_MIN_DISTANCE:
-            # Determine direction
-            direction = 'right' if horizontal_displacement > 0 else 'left'
-            
-            # Set cooldown and clear history
-            self.cooldown_counter = SWIPE_COOLDOWN_FRAMES
-            self.clear_history()
-            
-            return direction
-            
-        return None
-
-# check if hand is in open palm position
-def is_open_palm(hand_landmarks, hand_size):
-    wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
-    thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
-    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
-    middle_tip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
-    ring_tip = hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP]
-    pinky_tip = hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP]
-    
-    # Check if all fingers are extended (far from wrist)
-    distances = [
-        get_landmark_distance(wrist, index_tip) / hand_size,
-        get_landmark_distance(wrist, middle_tip) / hand_size,
-        get_landmark_distance(wrist, ring_tip) / hand_size,
-        get_landmark_distance(wrist, pinky_tip) / hand_size
-    ]
-    
-    # All fingers should be extended
-    status = all(d > OPEN_PALM_THRESHOLD for d in distances)
-    return status
-
-# Movement Thread for smoother cursor movement
-# this is a seperate thread, running at whatever rate CPU allows(100-1000 iter per sec).
-# moves the cursor to the target location set by the main camera loop, (~30 iter per sec).
+# Movement Thread
 class CursorMovementThread(threading.Thread):
     def __init__(self):
         super().__init__()
@@ -172,8 +69,7 @@ class CursorMovementThread(threading.Thread):
                 distance = np.hypot(self.target_x - self.current_x, self.target_y - self.current_y)
                 screen_diagonal = np.hypot(screen_width, screen_height)
                 if distance / screen_diagonal > self.jitter_threshold:
-                    # moves cursor faster to target if its far away from the target, slows down when it gets closer.
-                    step = max(0.0001, distance / 12)  # Smoother movement
+                    step = max(0.0001, distance / 12)
                     if distance != 0:
                         step_x = (self.target_x - self.current_x) / distance * step
                         step_y = (self.target_y - self.current_y) / distance * step
@@ -196,55 +92,59 @@ class CursorMovementThread(threading.Thread):
     def stop(self):
         self.running = False
 
-# Initialize the movement thread
 movement_thread = CursorMovementThread()
 movement_thread.start()
 
-# Initialize control variables
+# Control variables
 mouse_pressed = False
-base_touch_threshold = 0.5
+
+# Existing thresholds
+base_touch_threshold = 0.3
 base_curl_threshold = 1.5
+base_swipe_threshold = 0.20       # normalized X delta in [0,1]
+base_neutral_margin = 0.01
 
-# Initialize swipe detector
-swipe_detector = SwipeDetector(640)  # Default width, will be updated
+# Swipe detector parameters
+SWIPE_WINDOW_SEC = 0.35           # lookback window to measure displacement (secs)
+SWIPE_VEL_THRESH = 0.8            # normalized width per second
+SWIPE_COOLDOWN = 1.0              # seconds between swipes
+last_swipe_time = 0.0
+swipe_buffer = deque()            # (t, x) pairs while open palm is held
 
-# Frame counter for swipe detection
-frame_count = 0
-current_mode = 'neutral'  # Can be 'neutral', 'pointing', 'open_palm'
+# for pinch hysteresis
+PINCH_DOWN = 0.58 
+PINCH_UP   = 0.74
+PINCH_DEBOUNCE = 0.07
+last_pinch_event = 0.0
 
 try:
-    previous_y = None
-    last_action = 'neutral'
-
+    frame_count = 0
     while True:
-        # Read a frame from the webcam
         ret, frame = cap.read()
         if not ret:
             continue
 
         frame_count += 1
-
-        # Flip the frame horizontally for a natural selfie-view, and convert the BGR image to RGB
         frame = cv2.cvtColor(cv2.flip(frame, 1), cv2.COLOR_BGR2RGB)
-
-        # Update swipe detector with current frame width
-        swipe_detector.update_frame_width(frame.shape[1])
-
-        # Process the frame and find hands
         results = hands.process(frame)
-
-        # Convert the frame color back so it can be displayed
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        # Check for the presence of hands
         if results.multi_hand_landmarks:
+            movement_thread.activate()
+
             for hand_landmarks in results.multi_hand_landmarks:
 
-                # Calculate margins based on the current frame size
+                # draw the hand landmarks and connections
+                mp_drawing.draw_landmarks(
+                    frame,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_drawing_styles.get_default_hand_landmarks_style(),
+                    mp_drawing_styles.get_default_hand_connections_style()
+                )
+        
                 margin_width, margin_height = calculate_margins(frame.shape[1], frame.shape[0], inner_area_percent)
 
-                # Get all necessary landmarks
-                ring_finger_mcp = hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_MCP]
                 wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
                 middle_tip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
                 index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
@@ -255,98 +155,93 @@ try:
                 index_mcp = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_MCP]
                 pinky_mcp = hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_MCP]
 
-                # calculate hand size for normalizing
-                hand_size = get_landmark_distance(index_mcp, pinky_mcp) # independant of tip
+                # Hand size for normalization
+                hand_size = get_landmark_distance(index_mcp, pinky_mcp)
+                if hand_size < 1e-6:
+                    continue
 
-                # Check if hand is in open palm position for swipe detection
-                if is_open_palm(hand_landmarks, hand_size):
-                    current_mode = 'open_palm'
-                    movement_thread.deactivate()
-                    
-                    # Track palm center for swipe
-                    palm_center_x = (wrist.x + middle_mcp.x) / 2
-                    palm_center_y = (wrist.y + middle_mcp.y) / 2
-                    
-                    # Convert to pixel coordinates
-                    palm_x = int(palm_center_x * frame.shape[1])
-                    palm_y = int(palm_center_y * frame.shape[0])
-                    
-                    # Add position to swipe detector
-                    swipe_detector.add_position(palm_x, palm_y, frame_count)
-                    
-                    # Check for swipe
-                    swipe_direction = swipe_detector.detect_swipe(frame_count)
-                    if swipe_direction:
-                        if swipe_direction == 'left':
-                            pyautogui.press('left')
-                            print("Swipe Left - Left key pressed!")
-                        else:
-                            pyautogui.press('right')
-                            print("Swipe Right - Right key pressed!")
+                # Distances (normalized by hand_size)
+                d_wrist_middle_tip = get_landmark_distance(wrist, middle_tip) / hand_size
+                d_wrist_pinky_tip  = get_landmark_distance(wrist, pinky_tip)  / hand_size
+                d_wrist_ring_tip   = get_landmark_distance(wrist, ring_tip)   / hand_size
+                d_wrist_index_tip  = get_landmark_distance(wrist, index_tip)  / hand_size
+
+                # cursor movement when index extended and others curled
+                is_curl = all(d < base_curl_threshold for d in [
+                    d_wrist_ring_tip, d_wrist_pinky_tip, d_wrist_middle_tip
+                ])
+                if is_curl and (d_wrist_index_tip > base_curl_threshold):
+                    index_tip_x = int(index_tip.x * frame.shape[1])
+                    index_tip_y = int(index_tip.y * frame.shape[0])
+                    target_x, target_y = convert_to_screen_coordinates(
+                        index_tip_x, index_tip_y, frame.shape[1], frame.shape[0], margin_width, margin_height
+                    )
+                    movement_thread.update_target(target_x, target_y)
+
+                # open palm detection
+                open_palm = all(d > base_curl_threshold for d in [
+                    d_wrist_index_tip, d_wrist_middle_tip, d_wrist_ring_tip, d_wrist_pinky_tip
+                ])
+
+                # left-click on pinch
+                # needs to be open palm to avoid click on curl
+                pinch = get_landmark_distance(middle_tip, thumb_tip) / hand_size
+                now = time.time()
+                if (not mouse_pressed) and open_palm and (pinch < PINCH_DOWN) and (now - last_pinch_event > PINCH_DEBOUNCE):
+                    print(f"Mouse Down: {frame_count} : open palm - {open_palm}, pinch - {pinch}:{PINCH_DOWN}/{PINCH_UP}")
+                    pyautogui.mouseDown()
+                    mouse_pressed = True
+                    last_pinch_event = now
+                elif mouse_pressed and (pinch > PINCH_UP) and (now - last_pinch_event > PINCH_DEBOUNCE):
+                    print(f"Mouse UP: {frame_count} : open palm - {open_palm}, pinch - {pinch}:{PINCH_DOWN}/{PINCH_UP}")
+                    pyautogui.mouseUp()
+                    mouse_pressed = False
+                    last_pinch_event = now
+
+                t_now = time.time()
+                if open_palm:
+                    hand_x = float(middle_mcp.x)
+                    swipe_buffer.append((t_now, hand_x))
+
+                    # Drop old samples
+                    while swipe_buffer and (t_now - swipe_buffer[0][0] > SWIPE_WINDOW_SEC):
+                        swipe_buffer.popleft()
+
+                    # check displacement
+                    if len(swipe_buffer) >= 2:
+                        t0, x0 = swipe_buffer[0]
+                        t1, x1 = swipe_buffer[-1]
+                        dt = max(1e-6, t1 - t0)
+                        dx = x1 - x0
+                        speed = dx / dt
+
+                        can_fire = (t_now - last_swipe_time) > SWIPE_COOLDOWN
+                        if can_fire and abs(dx) >= base_swipe_threshold and abs(speed) >= SWIPE_VEL_THRESH:
+                            if dx > 0:
+                                pyautogui.press('right')
+                                print(f"Swipe Right: {frame_count} : {dx}/{base_swipe_threshold}")
+                            else:
+                                pyautogui.press('left')
+                                print(f"Swipe Left: {frame_count} : {dx}/{base_swipe_threshold}")
+                            last_swipe_time = t_now
+                            swipe_buffer.clear()  # reset window to avoid repeats
                 else:
-                    # Not in open palm, clear swipe history
-                    if current_mode == 'open_palm':
-                        swipe_detector.clear_history()
-                    
-                    ## 1. Cursor movement (pointing gesture)
-                    # curl detection
-                    # normalized distance calculation
-                    d_wrist_middle_tip = get_landmark_distance(wrist, middle_tip) / hand_size
-                    d_wrist_pinky_tip = get_landmark_distance(wrist, pinky_tip) / hand_size
-                    d_wrist_ring_tip = get_landmark_distance(wrist, ring_tip) / hand_size
-                    d_wrist_index_tip = get_landmark_distance(wrist, index_tip) / hand_size
-                    
-                    if all(d < base_curl_threshold for d in [
-                        d_wrist_ring_tip,
-                        d_wrist_pinky_tip,
-                        d_wrist_middle_tip
-                    ]) and (d_wrist_index_tip > base_curl_threshold):
-                        current_mode = 'pointing'
-                        movement_thread.activate()
-                        
-                        index_tip_x = int(index_tip.x * frame.shape[1])
-                        index_tip_y = int(index_tip.y * frame.shape[0])
-                        # Convert video coordinates to screen coordinates
-                        target_x, target_y = convert_to_screen_coordinates(index_tip_x, index_tip_y, frame.shape[1], frame.shape[0], margin_width, margin_height)
-                        # Update target position in movement thread
-                        movement_thread.update_target(target_x, target_y)
-                        
-                        ## 2. Left Click (while pointing)
-                        # Check if index finger and thumb are touching (for clicking)
-                        index_thumb_distance = get_landmark_distance(index_tip, thumb_tip) / hand_size
-                        if index_thumb_distance < base_touch_threshold:
-                            print("Click!")
-                            if not mouse_pressed:
-                                pyautogui.mouseDown()
-                                mouse_pressed = True
-                        else:
-                            if mouse_pressed:
-                                pyautogui.mouseUp()
-                                mouse_pressed = False
-                    else:
-                        current_mode = 'neutral'
-                        movement_thread.deactivate()
-                        if mouse_pressed:
-                            pyautogui.mouseUp()
-                            mouse_pressed = False
+                    # Not open palm → reset swipe window gradually
+                    if swipe_buffer:
+                        # keep tiny buffer so small gaps don't kill the gesture
+                        if (t_now - swipe_buffer[-1][0]) > 0.15:
+                            swipe_buffer.clear()
+
         else:
-            # no hands detected
-            current_mode = 'neutral'
             if mouse_pressed:
                 pyautogui.mouseUp()
                 mouse_pressed = False
             movement_thread.deactivate()
-            swipe_detector.clear_history()
+            swipe_buffer.clear()
 
-        # # Display current mode on screen (optional - for debugging)
-        # cv2.putText(frame, f"Mode: {current_mode}", (10, 30), 
-        #            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        
-        # # Show the frame (optional - for debugging)
-        # cv2.imshow('Hand Tracking', frame)
-
-        # if cv2.waitKey(1) & 0xFF == 27:
-        #     break
+        cv2.imshow('Hand Tracking', frame)
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
 
 finally:
     movement_thread.stop()

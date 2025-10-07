@@ -31,23 +31,30 @@ mp_hands = solutions.hands
 
 # Global variable to store latest results for visualization
 latest_result = None
-SWIPE_COOLDOWN = 0.5
+SWIPE_COOLDOWN = 1.0
 CLICK_COOLDOWN = 0.3
+SCROLL_THRESHOLD = 0.005 
+SCROLL_SENSITIVITY = 0.05
+
 last_swipe_time = 0.0
 last_click_time = 0.0
 swipe_entry_x = None
-
+just_swiped = False
+scroll_previous_y = None
 
 # Initialize state machin
 class States(enum.Enum):
     IDLE = 0
     POINT = 1
     SWIPE = 2
+    SCROLL = 3
 
 transitions = [
     ['point_up_detected', States.IDLE, States.POINT],
     ['open_palm_detected', States.IDLE, States.SWIPE],
+    ['fist_detected', States.IDLE, States.SCROLL],
     ['nothing', States.POINT, States.IDLE],
+    ['nothing', States.SCROLL, States.IDLE],
     ['nothing', States.SWIPE, States.IDLE]]
 
 machine = Machine(states=States, transitions=transitions, initial=States.IDLE)
@@ -119,8 +126,44 @@ class CursorMovementThread(threading.Thread):
     def stop(self):
         self.running = False
 
+# scroll thread
+class ScrollThread(threading.Thread):
+    def __init__(self):
+        super().__init__()
+        self.daemon = True
+        self.scroll_queue = []
+        self.scroll_lock = threading.Lock()
+        self.running = True
+        self.inertia = 0.95  # Slower reduction for rolling stop effect
+        self.scroll_step = 0.01  # Smaller step for smoother scroll
+        self.inertia_threshold = 0.01  # Minimum inertia scroll amount
+
+    def run(self):
+        while self.running:
+            if self.scroll_queue:
+                with self.scroll_lock:
+                    scroll_amount = self.scroll_queue.pop(0)
+                pyautogui.scroll(scroll_amount)
+                # Apply inertia effect if the queue is empty
+                if len(self.scroll_queue) == 0 and abs(scroll_amount) > self.inertia_threshold:
+                    scroll_amount *= self.inertia
+                    if abs(scroll_amount) > self.scroll_step:
+                        with self.scroll_lock:
+                            self.scroll_queue.append(scroll_amount)
+            time.sleep(0.005)  # Increased frequency for smoother processing
+
+    def add_scroll(self, scroll_amount):
+        with self.scroll_lock:
+            self.scroll_queue.append(scroll_amount)
+
+    def stop(self):
+        self.running = False
+
+
+scroll_thread = ScrollThread()
 movement_thread = CursorMovementThread()
 movement_thread.start()
+scroll_thread.start()
 
 def draw_landmarks_on_image(rgb_image, detection_result):
     """Draw hand landmarks on the image"""
@@ -190,7 +233,7 @@ def draw_gesture_info_on_frame(frame, result, cap):
 # Create a gesture recognizer instance with the live stream mode:
 def process_detection(result: GestureRecognizerResult, output_image: mp.Image, timestamp_ms: int):
     """Callback function to process gesture recognition results"""
-    global latest_result, last_swipe_time, last_click_time, swipe_entry_x
+    global latest_result, last_swipe_time, last_click_time, swipe_entry_x, just_swiped, scroll_previous_y
     latest_result = result
 
 
@@ -225,6 +268,14 @@ def process_detection(result: GestureRecognizerResult, output_image: mp.Image, t
                         machine.nothing()
                     machine.open_palm_detected()
 
+                elif curr_g == "Closed_Fist" and machine.state != States.SCROLL:
+                    if machine.state != States.IDLE:
+                        machine.nothing()
+                    machine.fist_detected()
+                    swipe_entry_x = None
+                    scroll_previous_y = None
+                    print(f"{machine.state} - Scroll mode activated")
+
                 elif curr_g == "None" and machine.state in [States.SWIPE]:
                     machine.nothing()
                     swipe_entry_x = None
@@ -250,26 +301,44 @@ def process_detection(result: GestureRecognizerResult, output_image: mp.Image, t
         # lateral move check
         middle_mcp = landmarks[9]
         current_x = middle_mcp.x
+
         if swipe_entry_x is None:
             swipe_entry_x = current_x
+            just_swiped = False
         else:
             dx = current_x - swipe_entry_x
             t_now = time.time()
-
             swipe_threshold = hand_size * 0.3
-            # print("debug", swipe_threshold, dx)
 
-            if (t_now - last_swipe_time) > SWIPE_COOLDOWN:
-                if dx > swipe_threshold:  # Simple threshold
+            # reset the "just swiped" flag if hand returns near center
+            if just_swiped and abs(dx) < swipe_threshold * 0.3:
+                just_swiped = False
+
+            if (t_now - last_swipe_time) > SWIPE_COOLDOWN and not just_swiped:
+                if dx > swipe_threshold:
                     pyautogui.press('right')
                     last_swipe_time = t_now
-                    swipe_entry_x = current_x
+                    just_swiped = True
                     print(f"{machine.state} - Swipe detected: Right arrow clicked.")
                 elif dx < -swipe_threshold:
                     pyautogui.press('left')
                     last_swipe_time = t_now
-                    swipe_entry_x = current_x       
+                    just_swiped = True
                     print(f"{machine.state} - Swipe detected: left arrow clicked.")
+
+    if machine.state == States.SCROLL and result.hand_landmarks:
+        landmarks = result.hand_landmarks[0]
+        wrist = landmarks[0]
+        current_y = wrist.y
+
+        if scroll_previous_y is not None:
+            delta_y = current_y - scroll_previous_y
+            if abs(delta_y) > SCROLL_THRESHOLD:
+                # Negative delta_y because hand moving up should scroll up
+                scroll_amount = -delta_y * screen_height * SCROLL_SENSITIVITY
+                scroll_thread.add_scroll(scroll_amount)
+
+        scroll_previous_y = current_y
 
 
 # Initialize options for gesture recognizer

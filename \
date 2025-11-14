@@ -223,11 +223,11 @@ def draw_gesture_info_on_frame(frame, result, cap):
                 y_position += 35
     
     # Display FPS
-    # fps_text = f'FPS: {cap.get(cv2.CAP_PROP_FPS):.1f}'
-    # cv2.putText(annotated_frame, fps_text,
-    #            (annotated_frame.shape[1] - 100, 30),
-    #            cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-    #            (255, 255, 255), 2, cv2.LINE_AA)
+    fps_text = f'FPS: {cap.get(cv2.CAP_PROP_FPS):.1f}'
+    cv2.putText(annotated_frame, fps_text,
+               (annotated_frame.shape[1] - 100, 30),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+               (255, 255, 255), 2, cv2.LINE_AA)
     
     return annotated_frame
 
@@ -384,12 +384,8 @@ with GestureRecognizer.create_from_options(options) as recognizer:
             annotated_frame = draw_landmarks_on_image(rgb_frame, latest_result)
             annotated_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_RGB2BGR)
             annotated_frame = draw_gesture_info_on_frame(annotated_frame, latest_result, cap)
-
-            text = f"{machine.state}"
-            cv2.putText(annotated_frame, text,
-                    (annotated_frame.shape[1] - 150, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                    (0, 0, 255), 1, cv2.LINE_AA)
+            text = "asd"
+            cv2.putText(annotated_frame, text, (frame.shape[0]-50,frame.shape[1]-50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0,0,255), 2, cv2.LINE_AA)
 
             cv2.imshow('Gesture Recognition with Hand Landmarks', annotated_frame)
         else:

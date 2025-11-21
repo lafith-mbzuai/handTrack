@@ -17,7 +17,7 @@ pyautogui.PAUSE = 0
 screen_width, screen_height = pyautogui.size()
 
 # define the portion of the camera view to map to the full screen (70% here)
-inner_area_percent = 0.7
+inner_area_percent = 1.0
 BaseOptions = mp.tasks.BaseOptions
 GestureRecognizer = mp.tasks.vision.GestureRecognizer
 GestureRecognizerOptions = mp.tasks.vision.GestureRecognizerOptions
@@ -64,6 +64,15 @@ def calculate_margins(frame_width, frame_height, inner_area_percent):
     margin_width = frame_width * (1 - inner_area_percent) / 2
     margin_height = frame_height * (1 - inner_area_percent) / 2
     return margin_width, margin_height
+
+def calculate_dynamic_inner_area(hand_size, min_size=0.08, max_size=0.2, min_area=0.6, max_area=1.0):
+    """Scale active area based on hand size (smaller hand => smaller area => higher sensitivity)."""
+    size_range = max_size - min_size
+    if size_range <= 0:
+        return max_area
+
+    normalized_size = np.clip((hand_size - min_size) / size_range, 0, 1)
+    return max_area - (max_area - min_area) * (1 - normalized_size)
 
 def convert_to_screen_coordinates(x, y, frame_width, frame_height, margin_width, margin_height):
     screen_x = np.interp(x, (margin_width, frame_width - margin_width), (0, screen_width))
@@ -286,12 +295,15 @@ def process_detection(result: GestureRecognizerResult, output_image: mp.Image, t
         landmarks = result.hand_landmarks[0]
         index_tip = landmarks[8]
 
+        hand_size = calculate_hand_size(landmarks)
+        dynamic_area = calculate_dynamic_inner_area(hand_size)
+
         index_tip_x = int(index_tip.x * output_image.width)
         index_tip_y = int(index_tip.y * output_image.height)
 
-        margin_width, margin_height = calculate_margins(output_image.width, output_image.height, inner_area_percent)
+        margin_width, margin_height = calculate_margins(output_image.width, output_image.height, dynamic_area)
         target_x, target_y = convert_to_screen_coordinates(
-            index_tip_x, index_tip_y, output_image.height, output_image.width, margin_width, margin_height
+            index_tip_x, index_tip_y, output_image.width, output_image.height, margin_width, margin_height
         )
         movement_thread.update_target(target_x, target_y)
 
@@ -354,8 +366,6 @@ options = GestureRecognizerOptions(
 
 # Initialize webcam
 cap = cv2.VideoCapture(0)  # Use 0 for default camera, or change to video file path
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 # Create gesture recognizer
 with GestureRecognizer.create_from_options(options) as recognizer:
